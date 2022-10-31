@@ -173,6 +173,17 @@ func (s *TrackerSource) processDirBasedCatalog() (map[string]*hub.Package, error
 				continue
 			}
 			packagesAvailable[pkg.BuildKey(p)] = p
+
+			// Signature
+			hasCosignSignature, err := s.i.Svc.Sc.HasCosignSignature(s.i.Svc.Ctx, "gcr.io/tekton-releases/catalog/upstream/git-clone:0.4", "", "")
+			if err != nil {
+				s.warn(fmt.Errorf("error getting package manifest (path: %s): %w", pkgPath, err))
+				continue
+			}
+
+			if hasCosignSignature {
+				p.Signed = true
+			}
 		}
 	}
 
@@ -252,6 +263,17 @@ func (s *TrackerSource) processGitBasedCatalog() (map[string]*hub.Package, error
 				continue
 			}
 			packagesAvailable[pkg.BuildKey(p)] = p
+
+			// Signature
+			hasCosignSignature, err := s.i.Svc.Sc.HasCosignSignature(s.i.Svc.Ctx, "gcr.io/tekton-releases/catalog/upstream/git-clone:0.4", "", "")
+			if err != nil {
+				s.warn(fmt.Errorf("error getting package manifest (path: %s): %w", pkgPath, err))
+				continue
+			}
+
+			if hasCosignSignature {
+				p.Signed = true
+			}
 		}
 
 		return nil
