@@ -48,8 +48,8 @@ func main() {
 	}()
 
 	// Check required external tools are available
-	if _, err := exec.LookPath("opm"); err != nil {
-		log.Fatal().Err(err).Msg("opm not found")
+	if _, err := exec.LookPath("darwin-amd64-opm"); err != nil {
+		log.Fatal().Err(err).Msg("darwin-amd64-opm not found")
 	}
 
 	// Setup services
