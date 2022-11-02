@@ -101,7 +101,7 @@ func (t *Tracker) Run() error {
 		// Check if this package version is already registered
 		digest, ok := packagesRegistered[pkg.BuildKey(p)]
 		if ok && (p.Digest == digest || p.Digest == hub.HasNotChanged) && !bypassDigestCheck {
-			continue
+			//continue
 		}
 
 		// Check if this package should be ignored

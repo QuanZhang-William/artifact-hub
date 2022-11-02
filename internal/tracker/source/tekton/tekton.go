@@ -1,6 +1,7 @@
 package tekton
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -20,7 +21,11 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/hashicorp/go-multierror"
+	"github.com/tektoncd/pipeline/pkg/apis/config"
 	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
+	"github.com/tektoncd/pipeline/pkg/container"
+	pipeline "github.com/tektoncd/pipeline/pkg/reconciler/pipelinerun/resources"
+	task "github.com/tektoncd/pipeline/pkg/reconciler/taskrun/resources"
 )
 
 const (
@@ -68,12 +73,21 @@ const (
 	screenshotsAnnotation     = "artifacthub.io/screenshots"
 
 	// examplesPath defines the location of the examples in the package's path.
-	examplesPath = "samples"
+	examplesPath                    = "samples"
+	objectIndividualVariablePattern = "params.%s.%s"
 )
 
 var (
 	// errInvalidAnnotation indicates that the annotation provided is not valid.
 	errInvalidAnnotation = errors.New("invalid annotation")
+
+	paramPatterns = []string{
+		"params.%s",
+		"params[%q]",
+		"params['%s']",
+		// FIXME(vdemeester) Remove that with deprecating v1beta1
+		"inputs.params.%s",
+	}
 )
 
 // TrackerSource is a hub.TrackerSource implementation for Tekton repositories.
@@ -344,6 +358,7 @@ func PreparePackage(i *PreparePackageInput) (*hub.Package, error) {
 	var name, version, description, tektonKind string
 	var annotations map[string]string
 	var tasks []map[string]interface{}
+	var containerImages []*hub.ContainerImage
 	switch m := i.Manifest.(type) {
 	case *v1beta1.Task:
 		tektonKind = "task"
@@ -351,12 +366,49 @@ func PreparePackage(i *PreparePackageInput) (*hub.Package, error) {
 		version = m.Labels[versionLabelTKey]
 		description = m.Spec.Description
 		annotations = m.Annotations
+
+		// Container Images
+		ts := m.TaskSpec()
+		var defaults []v1beta1.ParamSpec
+		if len(ts.Params) > 0 {
+			defaults = append(defaults, ts.Params...)
+		}
+		dummyTr := v1beta1.TaskRun{}
+		mts := task.ApplyParameters(context.Background(), &ts, &dummyTr, defaults...)
+		for _, s := range mts.Steps {
+			if s.Image != "" {
+				i := hub.ContainerImage{
+					Name:  s.Name,
+					Image: s.Image,
+				}
+				containerImages = append(containerImages, &i)
+			}
+		}
 	case *v1beta1.Pipeline:
 		tektonKind = "pipeline"
 		name = m.Name
 		version = m.Labels[versionLabelTKey]
 		description = m.Spec.Description
 		annotations = m.Annotations
+
+		// container images
+		var ps v1beta1.PipelineSpec
+		ps = m.PipelineSpec()
+		dummyPr := v1beta1.PipelineRun{}
+		mps := pipeline.ApplyParameters(context.Background(), &ps, &dummyPr)
+
+		for _, mts := range mps.Tasks {
+			for _, s := range mts.TaskSpec.Steps {
+				if s.Image != "" {
+					i := hub.ContainerImage{
+						Name:  s.Name,
+						Image: s.Image,
+					}
+					containerImages = append(containerImages, &i)
+				}
+			}
+		}
+
 		for _, task := range m.Spec.Tasks {
 			tasks = append(tasks, map[string]interface{}{
 				"name":      task.Name,
@@ -399,6 +451,7 @@ func PreparePackage(i *PreparePackageInput) (*hub.Package, error) {
 			RawManifestKey:         string(i.ManifestRaw),
 			TasksKey:               tasks,
 		},
+		ContainersImages: containerImages,
 	}
 
 	// Include content and source links
@@ -445,6 +498,81 @@ func PreparePackage(i *PreparePackageInput) (*hub.Package, error) {
 	}
 
 	return p, nil
+}
+
+func resolveContainerImages(tp *v1beta1.TaskSpec, defaults []v1beta1.ParamSpec) ([]*hub.ContainerImage, error) {
+	tModified := ApplyReplacements(context.Background(), tp, defaults)
+	var imagesToScan []*hub.ContainerImage
+
+	for _, s := range tModified.Steps {
+		if s.Image != "" {
+			i := hub.ContainerImage{
+				Name:  s.Name,
+				Image: s.Image,
+			}
+			imagesToScan = append(imagesToScan, &i)
+		}
+	}
+
+	// dedup
+	/*allKeys := make(map[string]bool)
+	list := []string{}
+	for _, item := range imagesToScan {
+		if _, value := allKeys[item]; !value {
+			allKeys[item] = true
+			list = append(list, item)
+		}
+	}*/
+	return imagesToScan, nil
+}
+
+func ApplyReplacements(ctx context.Context, spec *v1beta1.TaskSpec, defaults []v1beta1.ParamSpec) *v1beta1.TaskSpec {
+	// stringReplacements is used for standard single-string stringReplacements, while arrayReplacements contains arrays
+	// that need to be further processed.
+	stringReplacements := map[string]string{}
+	arrayReplacements := map[string][]string{}
+	cfg := config.FromContextOrDefaults(ctx)
+
+	// Set all the default stringReplacements
+	for _, p := range defaults {
+		if p.Default != nil {
+			switch p.Default.Type {
+			case v1beta1.ParamTypeArray:
+				for _, pattern := range paramPatterns {
+					// array indexing for param is alpha feature
+					if cfg.FeatureFlags.EnableAPIFields == config.AlphaAPIFields {
+						for i := 0; i < len(p.Default.ArrayVal); i++ {
+							stringReplacements[fmt.Sprintf(pattern+"[%d]", p.Name, i)] = p.Default.ArrayVal[i]
+						}
+					}
+					arrayReplacements[fmt.Sprintf(pattern, p.Name)] = p.Default.ArrayVal
+				}
+			case v1beta1.ParamTypeObject:
+				for k, v := range p.Default.ObjectVal {
+					stringReplacements[fmt.Sprintf(objectIndividualVariablePattern, p.Name, k)] = v
+				}
+			default:
+				for _, pattern := range paramPatterns {
+					stringReplacements[fmt.Sprintf(pattern, p.Name)] = p.Default.StringVal
+				}
+			}
+		}
+	}
+
+	// apply replacement for each step
+	return applyReplacements(spec, stringReplacements, arrayReplacements)
+}
+
+func applyReplacements(spec *v1beta1.TaskSpec, stringReplacements map[string]string, arrayReplacements map[string][]string) *v1beta1.TaskSpec {
+	spec = spec.DeepCopy()
+
+	// Apply variable expansion to steps fields.
+	steps := spec.Steps
+	for i := range steps {
+		container.ApplyStepReplacements(&steps[i], stringReplacements, arrayReplacements)
+	}
+
+	return spec
 }
 
 // prepareContentAndSourceLinks prepares the content and source urls for the
