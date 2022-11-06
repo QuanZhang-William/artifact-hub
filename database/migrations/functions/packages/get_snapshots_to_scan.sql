@@ -24,12 +24,6 @@ returns setof json as $$
         join repository r using (repository_id)
         where containers_images is not null
         and r.scanner_disabled = false
-        and s.ts > (current_timestamp - '1 year'::interval)
-        and (
-            security_report is null
-            or (security_report_created_at < (current_timestamp - '1 day'::interval) and s.version = p.latest_version)
-            or security_report_created_at < (current_timestamp - '1 week'::interval)
-        )
         and r.repository_kind_id <> 13 -- Kubewarden policies are excluded for now
         order by s.created_at desc
     ) s;

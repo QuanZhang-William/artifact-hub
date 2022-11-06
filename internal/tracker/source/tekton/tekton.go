@@ -1,6 +1,7 @@
 package tekton
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/hashicorp/go-multierror"
 	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
+	pp "github.com/tektoncd/pipeline/pkg/reconciler/pipelinerun/resources"
+	task "github.com/tektoncd/pipeline/pkg/reconciler/taskrun/resources"
 )
 
 const (
@@ -344,6 +347,7 @@ func PreparePackage(i *PreparePackageInput) (*hub.Package, error) {
 	var name, version, description, tektonKind string
 	var annotations map[string]string
 	var tasks []map[string]interface{}
+	var containerImages []*hub.ContainerImage
 	switch m := i.Manifest.(type) {
 	case *v1beta1.Task:
 		tektonKind = "task"
@@ -351,6 +355,24 @@ func PreparePackage(i *PreparePackageInput) (*hub.Package, error) {
 		version = m.Labels[versionLabelTKey]
 		description = m.Spec.Description
 		annotations = m.Annotations
+
+		// Container Images
+		ts := m.TaskSpec()
+		var defaults []v1beta1.ParamSpec
+		if len(ts.Params) > 0 {
+			defaults = append(defaults, ts.Params...)
+		}
+		dummyTr := v1beta1.TaskRun{}
+		mts := task.ApplyParameters(context.Background(), &ts, &dummyTr, defaults...)
+		for _, s := range mts.Steps {
+			if s.Image != "" {
+				i := hub.ContainerImage{
+					Name:  s.Name,
+					Image: s.Image,
+				}
+				containerImages = append(containerImages, &i)
+			}
+		}
 	case *v1beta1.Pipeline:
 		tektonKind = "pipeline"
 		name = m.Name
@@ -363,6 +385,24 @@ func PreparePackage(i *PreparePackageInput) (*hub.Package, error) {
 				"run_after": task.RunAfter,
 			})
 		}
+
+		var ps v1beta1.PipelineSpec
+		ps = m.PipelineSpec()
+		dummyPr := v1beta1.PipelineRun{}
+		mps := pp.ApplyParameters(context.Background(), &ps, &dummyPr)
+
+		for _, mts := range mps.Tasks {
+			for _, s := range mts.TaskSpec.Steps {
+				if s.Image != "" {
+					i := hub.ContainerImage{
+						Name:  s.Name,
+						Image: s.Image,
+					}
+					containerImages = append(containerImages, &i)
+				}
+			}
+		}
+
 	}
 
 	// Prepare version
@@ -399,6 +439,7 @@ func PreparePackage(i *PreparePackageInput) (*hub.Package, error) {
 			RawManifestKey:         string(i.ManifestRaw),
 			TasksKey:               tasks,
 		},
+		ContainersImages: containerImages,
 	}
 
 	// Include content and source links
